@@ -2474,18 +2474,19 @@
       const prodList = masterData.products || [];
       const existingStock = masterData.stock || [];
 
-      // 1. Build product map seeded from registered products
+      // 1. Build canonical product list keyed by product_code
       const productMap = new Map();
+      const nameToCodeMap = new Map();
 
+      // Seed with registered products first
       prodList.forEach(p => {
         const code = (p.product_code || '').trim();
         const name = (p.product_name || '').trim();
-        const key = code || name;
-        if (key) {
-          productMap.set(key, {
-            id: p.id,
-            product_code: code || `BIO-${String(productMap.size + 1).padStart(3, '0')}`,
-            product_name: name,
+        if (code) {
+          const entry = {
+            id: p.id || generateUUID(),
+            product_code: code,
+            product_name: name || `สินค้า ${code}`,
             category: p.product_type || 'ผลิตภัณฑ์จุลินทรีย์',
             unit: p.unit || 'แกลลอน',
             cost_price: Number(p.cost_price || p.selling_price || 80),
@@ -2495,71 +2496,72 @@
             in_val: 0,
             out_qty: 0,
             out_val: 0
-          });
+          };
+          productMap.set(code, entry);
+          if (name) nameToCodeMap.set(name, code);
         }
       });
 
-      // Seed with existing stock table items if any
+      // Overlay existing stock info (like correct Supabase UUID, reorder_point, unit)
       existingStock.forEach(s => {
         const code = (s.product_code || '').trim();
         const name = (s.product_name || '').trim();
-        const key = code || name;
-        if (key) {
-          if (!productMap.has(key)) {
-            productMap.set(key, {
-              id: s.id,
-              product_code: code || `BIO-${String(productMap.size + 1).padStart(3, '0')}`,
-              product_name: name,
-              category: s.category || 'ผลิตภัณฑ์จุลินทรีย์',
-              unit: s.unit || 'แกลลอน',
-              cost_price: Number(s.avg_cost || 80),
-              selling_price: 100,
-              reorder_point: Number(s.reorder_point || 10),
-              in_qty: 0,
-              in_val: 0,
-              out_qty: 0,
-              out_val: 0
-            });
-          } else {
-            const existing = productMap.get(key);
-            if (s.id && !existing.id) existing.id = s.id;
-            if (s.unit) existing.unit = s.unit;
-            if (s.avg_cost) existing.cost_price = Number(s.avg_cost);
-            if (s.reorder_point) existing.reorder_point = Number(s.reorder_point);
-          }
+        if (code && productMap.has(code)) {
+          const existing = productMap.get(code);
+          if (s.id) existing.id = s.id;
+          if (s.unit) existing.unit = s.unit;
+          if (s.avg_cost) existing.cost_price = Number(s.avg_cost);
+          if (s.reorder_point) existing.reorder_point = Number(s.reorder_point);
+        } else if (code && !productMap.has(code)) {
+          const entry = {
+            id: s.id || generateUUID(),
+            product_code: code,
+            product_name: name || `สินค้า ${code}`,
+            category: s.category || 'ผลิตภัณฑ์จุลินทรีย์',
+            unit: s.unit || 'แกลลอน',
+            cost_price: Number(s.avg_cost || 80),
+            selling_price: 100,
+            reorder_point: Number(s.reorder_point || 10),
+            in_qty: 0,
+            in_val: 0,
+            out_qty: 0,
+            out_val: 0
+          };
+          productMap.set(code, entry);
+          if (name) nameToCodeMap.set(name, code);
         }
       });
 
-      // 2. Loop through all transactions and calculate exact IN, OUT, and Balance
+      // 2. Tally transactions: calculate exact in_qty, out_qty
       transList.forEach(t => {
-        const tCode = (t.product_code || '').trim();
+        let tCode = (t.product_code || '').trim();
         const tName = (t.product_name || t.item_name || '').trim();
         const tQty = Number(t.qty || 0);
         const tPrice = Number(t.unit_price || 0);
         const tVal = Number(t.total_value || (tQty * tPrice));
-        const isReceive = (t.category === 'รับเข้า' || (t.transaction_type && t.transaction_type.includes('รับ')) || (t.category && t.category.includes('รับ')));
+        const isReceive = (t.category === 'รับเข้า' || (t.transaction_type && t.transaction_type.startsWith('รับเข้า')));
 
-        let matchedEntry = null;
-        if (tCode && productMap.has(tCode)) {
-          matchedEntry = productMap.get(tCode);
-        } else if (tName && productMap.has(tName)) {
-          matchedEntry = productMap.get(tName);
-        } else {
-          for (const [k, item] of productMap.entries()) {
-            if ((tCode && item.product_code === tCode) || 
-                (tName && (item.product_name === tName || tName.includes(item.product_code) || item.product_name.includes(tName)))) {
-              matchedEntry = item;
-              break;
+        // Resolve code if missing
+        if (!tCode && tName) {
+          if (nameToCodeMap.has(tName)) {
+            tCode = nameToCodeMap.get(tName);
+          } else {
+            for (const [code, item] of productMap.entries()) {
+              if (item.product_name === tName || tName.includes(code) || (item.product_name && item.product_name.includes(tName))) {
+                tCode = code;
+                break;
+              }
             }
           }
         }
 
-        if (!matchedEntry && (tCode || tName)) {
-          const key = tCode || tName;
-          matchedEntry = {
+        let entry = productMap.get(tCode);
+        if (!entry && (tCode || tName)) {
+          const fallbackCode = tCode || `BIO-${String(productMap.size + 1).padStart(3, '0')}`;
+          entry = {
             id: generateUUID(),
-            product_code: tCode || `BIO-${String(productMap.size + 1).padStart(3, '0')}`,
-            product_name: tName || `สินค้า ${tCode}`,
+            product_code: fallbackCode,
+            product_name: tName || `สินค้า ${fallbackCode}`,
             category: 'ผลิตภัณฑ์จุลินทรีย์',
             unit: 'แกลลอน',
             cost_price: tPrice || 80,
@@ -2570,16 +2572,17 @@
             out_qty: 0,
             out_val: 0
           };
-          productMap.set(key, matchedEntry);
+          productMap.set(fallbackCode, entry);
+          if (tName) nameToCodeMap.set(tName, fallbackCode);
         }
 
-        if (matchedEntry) {
+        if (entry) {
           if (isReceive) {
-            matchedEntry.in_qty += tQty;
-            matchedEntry.in_val += tVal;
+            entry.in_qty += tQty;
+            entry.in_val += tVal;
           } else {
-            matchedEntry.out_qty += tQty;
-            matchedEntry.out_val += tVal;
+            entry.out_qty += tQty;
+            entry.out_val += tVal;
           }
         }
       });
@@ -2629,6 +2632,86 @@
       return masterData.stock;
     }
 
+    async function syncStockToSupabase() {
+      if (!supabaseClient || !masterData.stock || masterData.stock.length === 0) return;
+      try {
+        const { data: supaStocks } = await supabaseClient.from('stock').select('id, product_code');
+        const supaIdMap = new Map((supaStocks || []).map(s => [s.product_code, s.id]));
+
+        for (const stk of masterData.stock) {
+          const payload = {
+            product_code: stk.product_code,
+            product_name: stk.product_name,
+            unit: stk.unit || 'แกลลอน',
+            qty: parseFloat(stk.qty) || 0,
+            avg_cost: parseFloat(stk.avg_cost) || 0,
+            total_value: parseFloat(stk.total_value) || 0,
+            status: stk.status || 'ปกติ',
+            reorder_point: parseFloat(stk.reorder_point) || 10,
+            updated_at: new Date().toISOString()
+          };
+
+          const existingId = supaIdMap.get(stk.product_code) || stk.id;
+          if (existingId) {
+            await supabaseClient.from('stock').update(payload).eq('id', existingId);
+          } else {
+            const { data } = await supabaseClient.from('stock').insert([payload]).select();
+            if (data && data[0]) {
+              stk.id = data[0].id;
+              supaIdMap.set(stk.product_code, stk.id);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Sync stock to Supabase error:', err);
+      }
+    }
+
+    function recalculateFinancialRunningBalances() {
+      if (!masterData.financials || !Array.isArray(masterData.financials) || masterData.financials.length === 0) return;
+
+      // 1. Sort records strictly ascending chronologically (oldest first: date asc, created_at asc)
+      const sorted = [...masterData.financials].sort((a, b) => {
+        const dA = (a.transaction_date || a.record_date || '').toString().slice(0, 10);
+        const dB = (b.transaction_date || b.record_date || '').toString().slice(0, 10);
+        if (dA !== dB) return dA.localeCompare(dB);
+        const cA = (a.created_at || a.doc_number || '').toString();
+        const cB = (b.created_at || b.doc_number || '').toString();
+        return cA.localeCompare(cB);
+      });
+
+      // 2. Compute Running Balance: balance = previous_balance + income - expense
+      let runningBalance = 0;
+      sorted.forEach((row, idx) => {
+        const inc = parseFloat(row.income) || 0;
+        const exp = parseFloat(row.expense) || 0;
+        if (idx === 0) {
+          const explicitBal = (row.balance !== undefined && row.balance !== null && !isNaN(row.balance)) ? parseFloat(row.balance) : (inc - exp);
+          row.balance = explicitBal;
+          runningBalance = row.balance;
+        } else {
+          runningBalance = runningBalance + inc - exp;
+          row.balance = runningBalance;
+        }
+      });
+
+      // 3. Map back to masterData.financials preserving object references
+      const balanceMap = new Map();
+      sorted.forEach(r => {
+        const key = r.id || r.doc_number;
+        if (key) balanceMap.set(key, r.balance);
+      });
+
+      masterData.financials.forEach(r => {
+        const key = r.id || r.doc_number;
+        if (key && balanceMap.has(key)) {
+          r.balance = balanceMap.get(key);
+        }
+      });
+
+      localStorage.setItem('spa_financials', JSON.stringify(masterData.financials));
+    }
+
     async function loadAllMasterData() {
       showLoader('กำลังเชื่อมต่อและดึงข้อมูลทั้งหมดจาก Supabase Cloud...');
       const tables = ['products', 'customers', 'categories', 'master_items', 'stock', 'transactions', 'financials', 'app_users'];
@@ -2652,6 +2735,8 @@
 
           // Sync stock mathematically with transactions
           recalculateStockFromTransactions();
+          syncStockToSupabase();
+          recalculateFinancialRunningBalances();
 
           const transCount = (masterData.transactions || []).length;
           updateMonitorMetrics(28, transCount);
@@ -2714,6 +2799,7 @@
         }
       }
       recalculateStockFromTransactions();
+      recalculateFinancialRunningBalances();
     }
 
     function populateDepartmentDropdown() {
@@ -6040,7 +6126,11 @@
       }
 
       const opt = prodSelect.options[prodSelect.selectedIndex];
-      const prodCode = opt ? (opt.dataset.code || '') : '';
+      let prodCode = opt ? (opt.dataset.code || '') : '';
+      if (!prodCode && prodName) {
+        const matched = (masterData.products || []).find(p => p.product_name === prodName);
+        if (matched && matched.product_code) prodCode = matched.product_code;
+      }
       const unit = opt ? (opt.dataset.unit || 'แกลลอน') : 'แกลลอน';
       const unitPrice = Number(document.getElementById('cart-prod-price').value || 0);
       const qty = Number(document.getElementById('cart-prod-qty').value || 1);
@@ -6199,7 +6289,31 @@
         const isInc = payload.main_category === 'รายรับ';
         payload.income = isInc ? (parseFloat(payload.income) || 0) : 0;
         payload.expense = !isInc ? (parseFloat(payload.expense) || 0) : 0;
-        payload.balance = payload.income - payload.expense;
+
+        // Calculate accurate Running Balance based on previous chronological balance
+        const currentList = (masterData.financials || []).filter(r => r.id !== editingRecordId);
+        currentList.sort((a, b) => {
+          const dA = (a.transaction_date || a.record_date || '').toString().slice(0, 10);
+          const dB = (b.transaction_date || b.record_date || '').toString().slice(0, 10);
+          if (dA !== dB) return dA.localeCompare(dB);
+          const cA = (a.created_at || a.doc_number || '').toString();
+          const cB = (b.created_at || b.doc_number || '').toString();
+          return cA.localeCompare(cB);
+        });
+
+        const targetDate = (payload.transaction_date || payload.record_date || new Date().toISOString()).toString().slice(0, 10);
+        let prevBalance = 0;
+        const priorRecords = currentList.filter(r => {
+          const rDate = (r.transaction_date || r.record_date || '').toString().slice(0, 10);
+          return rDate <= targetDate;
+        });
+
+        if (priorRecords.length > 0) {
+          const lastPrior = priorRecords[priorRecords.length - 1];
+          prevBalance = parseFloat(lastPrior.balance) || 0;
+        }
+
+        payload.balance = prevBalance + payload.income - payload.expense;
 
         // Auto match codes if present in master_items / categories
         const matchedMaster = (masterData.master_items || []).find(m => m.item_name === payload.item_name);
@@ -6375,7 +6489,7 @@
       const category = document.getElementById('cart-category').value || (currentCartMode === 'inbound' ? 'รับเข้า' : 'จ่ายออก');
       const docNumber = document.getElementById('cart-doc-number').value || generateDocNumber(currentCartMode === 'inbound' ? 'IN' : 'OUT');
       const transType = document.getElementById('cart-trans-type').value;
-      const recordedBy = currentUser ? (currentUser.full_name || currentUser.username) : 'นายแสงตะวัน ชาวเขา';
+      const recordedBy = (currentUser && (currentUser.full_name || currentUser.username)) || 'นายแสงตะวัน ชาวเขา';
       const custCode = (masterData.customers || []).find(c => c.customer_name === customerName)?.customer_code || '';
 
       // Final stock check for Outbound
@@ -6400,37 +6514,22 @@
       showLoader(isEditingCart ? 'กำลังอัปเดตข้อมูลไปยัง Supabase Cloud...' : 'กำลังบันทึกรายการลง Supabase Cloud...');
 
       try {
+        if (!supabaseClient) {
+          throw new Error('ไม่พบการเชื่อมต่อฐานข้อมูล Supabase Cloud กรุณาตรวจสอบอินเทอร์เน็ตหรือรีเฟรชหน้าจอ');
+        }
+
         if (isEditingCart) {
           // --- EDITING MODE: UPDATE EXISTING ROWS IN SUPABASE ---
-          
-          // 1. Revert old stock changes
-          if (masterData.stock && editingTransactionOriginalItems.length > 0) {
-            for (const orig of editingTransactionOriginalItems) {
-              const stk = masterData.stock.find(s => (orig.product_code && s.product_code === orig.product_code) || (orig.product_name && s.product_name === orig.product_name));
-              if (stk) {
-                const revertChange = (orig.category === 'รับเข้า' || (orig.transaction_type && orig.transaction_type.includes('รับเข้า'))) ? -Number(orig.qty) : Number(orig.qty);
-                stk.qty = Math.max(0, (Number(stk.qty) || 0) + revertChange);
-                stk.total_value = stk.qty * (Number(stk.avg_cost) || 100);
-                if (supabaseClient && stk.id) {
-                  try { await supabaseClient.from('stock').update({ qty: stk.qty, total_value: stk.total_value }).eq('id', stk.id); } catch(e){}
-                }
-              }
-            }
-          }
-
-          // 2. Identify updated, newly added, and deleted items
           const origIdMap = new Map(editingTransactionOriginalItems.map(o => [o.id, o]));
           const currentIdSet = new Set(currentCartItems.filter(i => i.id).map(i => i.id));
           const deletedIds = editingTransactionOriginalItems.filter(o => !currentIdSet.has(o.id)).map(o => o.id);
 
           // A. Delete removed items from Supabase & local state
           if (deletedIds.length > 0) {
-            if (supabaseClient) {
-              try {
-                await supabaseClient.from('transactions').delete().in('id', deletedIds);
-              } catch (err) {
-                console.warn('Supabase delete during edit warning:', err);
-              }
+            const { error: delErr } = await supabaseClient.from('transactions').delete().in('id', deletedIds);
+            if (delErr) {
+              console.error('Supabase delete error during edit:', delErr);
+              throw new Error(delErr.message || 'เกิดข้อผิดพลาดในการลบรายการเดิมออกจาก Supabase Cloud');
             }
             masterData.transactions = (masterData.transactions || []).filter(t => !deletedIds.includes(t.id));
           }
@@ -6438,97 +6537,61 @@
           // B. Update existing items or Insert new items
           for (let idx = 0; idx < currentCartItems.length; idx++) {
             const item = currentCartItems[idx];
+            let pCode = (item.product_code || '').trim();
+            let pName = (item.product_name || '').trim();
+            if (!pCode && pName) {
+              const matchedP = (masterData.products || []).find(p => p.product_name === pName);
+              if (matchedP && matchedP.product_code) pCode = matchedP.product_code;
+            }
+            const q = parseFloat(item.qty) || 0;
+            const up = parseFloat(item.unit_price) || 0;
             const payload = {
               transaction_date: transDate,
               doc_number: docNumber,
               category: category,
               transaction_type: transType,
-              customer_name: customerName,
-              customer_code: custCode,
-              product_code: item.product_code,
-              product_name: item.product_name,
-              qty: parseFloat(item.qty) || 0,
-              unit_price: parseFloat(item.unit_price) || 0,
-              total_value: parseFloat(item.total_value) || 0,
+              customer_name: customerName || 'ไม่ระบุ',
+              customer_code: custCode || null,
+              product_code: pCode || 'BIO-000',
+              product_name: pName,
+              qty: q,
+              unit_price: up,
+              total_value: q * up,
               recorded_by: recordedBy
             };
 
             if (item.id && origIdMap.has(item.id)) {
-              if (supabaseClient) {
-                try {
-                  const updatePayload = { ...payload };
-                  delete updatePayload.id;
-                  await supabaseClient.from('transactions').update(updatePayload).eq('id', item.id);
-                } catch (err) {
-                  console.warn('Supabase row update warning:', err);
-                }
+              const updatePayload = { ...payload };
+              delete updatePayload.id;
+              const { error: upErr } = await supabaseClient.from('transactions').update(updatePayload).eq('id', item.id);
+              if (upErr) {
+                console.error('Supabase row update error:', upErr);
+                throw new Error(upErr.message || 'เกิดข้อผิดพลาดในการแก้ไขรายการบน Supabase Cloud');
               }
               const localIdx = (masterData.transactions || []).findIndex(t => t.id === item.id);
               if (localIdx >= 0) {
                 masterData.transactions[localIdx] = { ...masterData.transactions[localIdx], ...payload };
               }
             } else {
-              const insertRecord = { ...payload };
+              const insertRecord = { ...payload, created_at: new Date().toISOString() };
               delete insertRecord.id;
-              insertRecord.created_at = new Date().toISOString();
-              let newId = generateUUID();
-              if (supabaseClient) {
-                try {
-                  const { data, error } = await supabaseClient.from('transactions').insert([insertRecord]).select();
-                  if (data && data[0] && data[0].id) newId = data[0].id;
-                } catch (err) {
-                  console.warn('Supabase insert new item in edit warning:', err);
-                }
+              const { data: insData, error: insErr } = await supabaseClient.from('transactions').insert([insertRecord]).select();
+              if (insErr) {
+                console.error('Supabase row insert in edit error:', insErr);
+                throw new Error(insErr.message || 'เกิดข้อผิดพลาดในการเพิ่มรายการใหม่ลง Supabase Cloud');
               }
-              const newRecord = {
-                ...payload,
-                id: newId,
-                created_at: insertRecord.created_at
-              };
+              const newRecord = (insData && insData[0]) ? insData[0] : { ...insertRecord, id: generateUUID() };
               if (!masterData.transactions) masterData.transactions = [];
               masterData.transactions.unshift(newRecord);
-            }
-
-            // Apply new stock effect
-            if (!masterData.stock) masterData.stock = [];
-            let stk = masterData.stock.find(s => (item.product_code && s.product_code === item.product_code) || (item.product_name && s.product_name === item.product_name));
-            if (stk) {
-              const newChange = category === 'รับเข้า' ? Number(item.qty) : -Number(item.qty);
-              stk.qty = Math.max(0, (Number(stk.qty) || 0) + newChange);
-              stk.total_value = stk.qty * (Number(stk.avg_cost) || 100);
-              if (supabaseClient && stk.id) {
-                try { await supabaseClient.from('stock').update({ qty: stk.qty, total_value: stk.total_value }).eq('id', stk.id); } catch(e){}
-              }
-            } else if (category === 'รับเข้า') {
-              const newStk = {
-                product_code: item.product_code,
-                product_name: item.product_name,
-                category: 'ผลิตภัณฑ์จุลินทรีย์',
-                unit: item.unit || 'แกลลอน',
-                qty: Number(item.qty),
-                avg_cost: Number(item.unit_price) || 80,
-                total_value: Number(item.qty) * (Number(item.unit_price) || 80),
-                created_at: new Date().toISOString()
-              };
-              if (supabaseClient) {
-                try {
-                  const { data } = await supabaseClient.from('stock').insert([newStk]).select();
-                  if (data && data[0] && data[0].id) newStk.id = data[0].id;
-                  else newStk.id = generateUUID();
-                } catch(e) { newStk.id = generateUUID(); }
-              } else {
-                newStk.id = generateUUID();
-              }
-              masterData.stock.unshift(newStk);
             }
           }
 
           masterData.transactions = sortRecordsByLatest(masterData.transactions);
           localStorage.setItem('spa_transactions', JSON.stringify(masterData.transactions));
-          if (masterData.stock) {
-            masterData.stock = sortRecordsByLatest(masterData.stock);
-            localStorage.setItem('spa_stock', JSON.stringify(masterData.stock));
-          }
+
+          // RECALCULATE EXACT STOCK & SYNC TO SUPABASE
+          recalculateStockFromTransactions();
+          await syncStockToSupabase();
 
           isEditingCart = false;
           editingTransactionOriginalItems = [];
@@ -6537,8 +6600,8 @@
           closeModal('modal-transaction-cart');
 
           Swal.fire({
-            title: 'แก้ไขข้อมูลสำเร็จ!',
-            html: `อัปเดตรายการลงในฐานข้อมูลเรียบร้อย<br><span style="color:#10b981; font-family:monospace;">เลขที่เอกสาร: ${docNumber}</span><br>หมวด: <b>${category}</b> (${transType})`,
+            title: 'แก้ไขข้อมูลสำเร็จ 100%!',
+            html: `อัปเดตรายการลงในฐานข้อมูล <b>Supabase Cloud</b> และคำนวณตัดสต๊อกใหม่เรียบร้อยตรงกันสมบูรณ์<br><span style="color:#10b981; font-family:monospace;">เลขที่เอกสาร: ${docNumber}</span><br>หมวด: <b>${category}</b> (${transType})`,
             icon: 'success',
             confirmButtonColor: '#10b981',
             confirmButtonText: 'ตกลง',
@@ -6548,103 +6611,56 @@
 
         } else {
           // --- NEW INSERT MODE ---
-          const recordsToInsert = currentCartItems.map((item) => ({
-            transaction_date: transDate,
-            doc_number: docNumber,
-            category: category,
-            transaction_type: transType,
-            customer_name: customerName,
-            customer_code: custCode,
-            product_code: item.product_code,
-            product_name: item.product_name,
-            qty: parseFloat(item.qty) || 0,
-            unit_price: parseFloat(item.unit_price) || 0,
-            total_value: parseFloat(item.total_value) || 0,
-            recorded_by: recordedBy,
-            created_at: new Date().toISOString()
-          }));
-
-          let insertedRows = [];
-          if (supabaseClient) {
-            try {
-              const { data, error } = await supabaseClient.from('transactions').insert(recordsToInsert).select();
-              if (error) {
-                console.warn('Supabase bulk insert warning:', error);
-              } else if (data && data.length > 0) {
-                insertedRows = data;
-              }
-            } catch (err) {
-              console.warn('Supabase bulk insert exception:', err);
+          const recordsToInsert = currentCartItems.map((item) => {
+            let pCode = (item.product_code || '').trim();
+            let pName = (item.product_name || '').trim();
+            if (!pCode && pName) {
+              const matchedP = (masterData.products || []).find(p => p.product_name === pName);
+              if (matchedP && matchedP.product_code) pCode = matchedP.product_code;
             }
+            const q = parseFloat(item.qty) || 0;
+            const up = parseFloat(item.unit_price) || 0;
+            return {
+              transaction_date: transDate,
+              doc_number: docNumber,
+              category: category,
+              transaction_type: transType,
+              customer_name: customerName || 'ไม่ระบุ',
+              customer_code: custCode || null,
+              product_code: pCode || 'BIO-000',
+              product_name: pName,
+              qty: q,
+              unit_price: up,
+              total_value: q * up,
+              recorded_by: recordedBy,
+              created_at: new Date().toISOString()
+            };
+          });
+
+          const { data, error } = await supabaseClient.from('transactions').insert(recordsToInsert).select();
+          if (error) {
+            console.error('Supabase bulk insert error:', error);
+            throw new Error(error.message || 'เกิดข้อผิดพลาดในการบันทึกข้อมูลธุรกรรมลง Supabase Cloud');
           }
 
-          const localRecords = insertedRows.length === recordsToInsert.length 
-            ? insertedRows 
-            : recordsToInsert.map(r => ({ ...r, id: generateUUID() }));
+          if (!data || data.length === 0) {
+            throw new Error('ไม่ได้รับข้อมูลยืนยันจาก Supabase Cloud หลังการบันทึก');
+          }
 
           if (!masterData.transactions) masterData.transactions = [];
-          masterData.transactions = sortRecordsByLatest([...localRecords, ...masterData.transactions]);
+          masterData.transactions = sortRecordsByLatest([...data, ...masterData.transactions]);
           localStorage.setItem('spa_transactions', JSON.stringify(masterData.transactions));
 
-          // REAL-TIME STOCK UPDATE IN SUPABASE AND LOCAL
-          if (!masterData.stock) masterData.stock = [];
-
-          for (const cartItm of currentCartItems) {
-            let stk = masterData.stock.find(s => 
-              (cartItm.product_code && s.product_code === cartItm.product_code) || 
-              (cartItm.product_name && s.product_name === cartItm.product_name)
-            );
-
-            if (stk) {
-              const change = category === 'รับเข้า' ? Number(cartItm.qty) : -Number(cartItm.qty);
-              stk.qty = Math.max(0, (Number(stk.qty) || 0) + change);
-              const cost = Number(stk.avg_cost) || Number(cartItm.unit_price) || 80;
-              stk.total_value = stk.qty * cost;
-
-              if (supabaseClient && stk.id) {
-                try {
-                  await supabaseClient.from('stock').update({ qty: stk.qty, total_value: stk.total_value }).eq('id', stk.id);
-                } catch (e) {
-                  console.warn('Supabase stock update error:', e);
-                }
-              }
-            } else if (category === 'รับเข้า') {
-              const newStk = {
-                product_code: cartItm.product_code,
-                product_name: cartItm.product_name,
-                category: 'ผลิตภัณฑ์จุลินทรีย์',
-                unit: cartItm.unit || 'แกลลอน',
-                qty: Number(cartItm.qty),
-                avg_cost: Number(cartItm.unit_price) || 80,
-                total_value: Number(cartItm.qty) * (Number(cartItm.unit_price) || 80),
-                created_at: new Date().toISOString()
-              };
-
-              if (supabaseClient) {
-                try {
-                  const { data } = await supabaseClient.from('stock').insert([newStk]).select();
-                  if (data && data[0] && data[0].id) newStk.id = data[0].id;
-                  else newStk.id = generateUUID();
-                } catch (e) {
-                  newStk.id = generateUUID();
-                }
-              } else {
-                newStk.id = generateUUID();
-              }
-
-              masterData.stock.unshift(newStk);
-            }
-          }
-
-          masterData.stock = sortRecordsByLatest(masterData.stock);
-          localStorage.setItem('spa_stock', JSON.stringify(masterData.stock));
+          // RECALCULATE EXACT STOCK & SYNC TO SUPABASE
+          recalculateStockFromTransactions();
+          await syncStockToSupabase();
 
           hideLoader();
           closeModal('modal-transaction-cart');
           
           Swal.fire({
-            title: 'บันทึกข้อมูลสำเร็จ!',
-            html: `บันทึกรายการทั้งหมด <b>${recordsToInsert.length}</b> รายการลงทั้งหน้าเว็บและ Supabase สำเร็จ<br><span style="color:#10b981; font-family:monospace;">เลขที่เอกสาร: ${docNumber}</span><br>หมวด: <b>${category}</b> (${transType})`,
+            title: 'บันทึกข้อมูลสำเร็จ 100%!',
+            html: `บันทึกรายการทั้งหมด <b>${recordsToInsert.length}</b> รายการลงทั้งฐานข้อมูล <b>Supabase Cloud</b> และตัดสต๊อกเรียบร้อยตรงกันสมบูรณ์<br><span style="color:#10b981; font-family:monospace;">เลขที่เอกสาร: ${docNumber}</span><br>หมวด: <b>${category}</b> (${transType})`,
             icon: 'success',
             confirmButtonColor: '#10b981',
             confirmButtonText: 'ตกลง',
@@ -6654,15 +6670,25 @@
         }
       } catch (fatalErr) {
         hideLoader();
+        console.error('saveTransactionCart fatal error:', fatalErr);
         Swal.fire({
-          title: 'เกิดข้อผิดพลาดในการบันทึก!',
-          html: `ข้อความแจ้งเตือน: <span class="text-rose-400">${fatalErr.message || fatalErr}</span>`,
+          title: 'บันทึกข้อมูลไม่สำเร็จ!',
+          html: `<div class="text-left space-y-2 text-xs">
+                   <div class="p-3 rounded-xl bg-rose-950/80 border border-rose-500/50 text-rose-300 font-medium">
+                     <i class="fas fa-times-circle text-rose-400 mr-1.5"></i>
+                     เกิดข้อผิดพลาดจาก Supabase Cloud: <b>${fatalErr.message || fatalErr}</b>
+                   </div>
+                   <p class="text-slate-300 text-[11px] mt-1">
+                     ⚠️ ข้อมูลยังไม่ถูกบันทึกลงฐานข้อมูล กรุณาตรวจสอบและลองกดบันทึกใหม่อีกครั้ง
+                   </p>
+                 </div>`,
           icon: 'error',
           confirmButtonColor: '#e11d48',
-          confirmButtonText: 'ตกลง',
+          confirmButtonText: 'รับทราบ',
           background: '#0d1527',
           color: '#fff'
         });
+        return;
       }
 
       // Real-time update badges & counters
@@ -6818,6 +6844,14 @@
           masterData[activePage].unshift(payload);
         }
 
+        if (activePage === 'financials') {
+          recalculateFinancialRunningBalances();
+        }
+        if (activePage === 'transactions' || activePage === 'stock' || activePage === 'products') {
+          recalculateStockFromTransactions();
+          syncStockToSupabase();
+        }
+
         masterData[activePage] = sortRecordsByLatest(masterData[activePage]);
         localStorage.setItem(`spa_${activePage}`, JSON.stringify(masterData[activePage]));
 
@@ -6876,6 +6910,15 @@
             if (tableStates[activePage]) {
               tableStates[activePage].selected.delete(id);
             }
+
+            if (activePage === 'financials') {
+              recalculateFinancialRunningBalances();
+            }
+            if (activePage === 'transactions' || activePage === 'stock' || activePage === 'products') {
+              recalculateStockFromTransactions();
+              syncStockToSupabase();
+            }
+
             localStorage.setItem(`spa_${activePage}`, JSON.stringify(masterData[activePage]));
 
             // Update nav counter
@@ -6931,6 +6974,15 @@
             }
             masterData[activePage] = (masterData[activePage] || []).filter(r => !state.selected.has(r.id));
             state.selected.clear();
+
+            if (activePage === 'financials') {
+              recalculateFinancialRunningBalances();
+            }
+            if (activePage === 'transactions' || activePage === 'stock' || activePage === 'products') {
+              recalculateStockFromTransactions();
+              syncStockToSupabase();
+            }
+
             localStorage.setItem(`spa_${activePage}`, JSON.stringify(masterData[activePage]));
 
             // Update nav counter
@@ -8284,6 +8336,10 @@ GRANT ALL ON TABLE app_users TO anon, authenticated, service_role;`;
 
         if (activePage === 'transactions' || activePage === 'products' || activePage === 'stock') {
           recalculateStockFromTransactions();
+          syncStockToSupabase();
+        }
+        if (activePage === 'financials') {
+          recalculateFinancialRunningBalances();
         }
 
         renderActivePage();
